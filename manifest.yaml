@@ -1,0 +1,31 @@
+display_information:
+  name: Review Queue Bot
+  description: Tracks who has how many content reviews assigned, and lets reviewers close them from Slack.
+  background_color: "#611f69"
+features:
+  bot_user:
+    display_name: reviewqueue
+    always_online: true
+  slash_commands:
+    - command: /queue
+      description: Show your current review queue and count
+      usage_hint: ""
+      should_escape: false
+  shortcuts:
+    - name: Add to Review Queue
+      type: message
+      callback_id: add_to_queue
+      description: Assign this item to a reviewer's queue
+oauth_config:
+  scopes:
+    bot:
+      - commands
+      - chat:write
+      - users:read
+      - im:write
+settings:
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
