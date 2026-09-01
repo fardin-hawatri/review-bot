@@ -188,6 +188,7 @@ const TRIGGER_PATTERN = /(^|\s)[!/]review\b/i;
 
 // ---- Auto-detect "!review @name" (or "/review @name") in messages and add to that person's queue ----
 app.event('message', async ({ event, client, context }) => {
+  console.log('[message event received]', { text: event.text, subtype: event.subtype, channel: event.channel, botUserId: context.botUserId });
   if (event.subtype) return; // skip edits, deletes, joins, bot messages, etc.
   if (event.bot_id) return;
   if (!TRIGGER_PATTERN.test(event.text || '')) return; // ignore plain chat — only explicit !review counts
