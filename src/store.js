@@ -61,4 +61,21 @@ function getItem(itemId) {
   return data.items.find((i) => i.id === itemId);
 }
 
-module.exports = { addItem, closeItem, getOpenQueueForUser, getItem };
+// Returns { userId: openCount } for every assignee who currently has open items.
+function getAllOpenGroupedByAssignee() {
+  const data = readData();
+  const grouped = {};
+  for (const item of data.items) {
+    if (item.status !== 'open') continue;
+    grouped[item.assigneeId] = (grouped[item.assigneeId] || 0) + 1;
+  }
+  return grouped;
+}
+
+module.exports = {
+  addItem,
+  closeItem,
+  getOpenQueueForUser,
+  getItem,
+  getAllOpenGroupedByAssignee,
+};

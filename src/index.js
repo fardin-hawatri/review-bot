@@ -71,6 +71,19 @@ async function getChannelHumanMembers(client, channelId, excludeUserId) {
   return humans;
 }
 
+// ---- Only messages containing this trigger count as a review assignment ----
+const TRIGGER_PATTERN = /(^|\s)[!/]review\b/i;
+
+// ---- Pull the task name out of "!review TaskName @Name" (everything between the trigger and the first mention) ----
+function extractTaskName(text) {
+  const triggerMatch = (text || '').match(/[!/]review\b/i);
+  if (!triggerMatch) return '';
+  const afterTrigger = text.slice(triggerMatch.index + triggerMatch[0].length);
+  const mentionIndex = afterTrigger.search(/<@[A-Z0-9]+>/);
+  const raw = mentionIndex === -1 ? afterTrigger : afterTrigger.slice(0, mentionIndex);
+  return raw.trim();
+}
+
 // ---- /queue : show my current assigned count + list ----
 app.command('/queue', async ({ command, ack, respond }) => {
   await ack();
@@ -92,6 +105,26 @@ app.command('/queue', async ({ command, ack, respond }) => {
   await respond({
     response_type: 'ephemeral',
     text: `You have *${items.length}* item${items.length === 1 ? '' : 's'} in your queue:\n${lines}`,
+  });
+});
+
+// ---- /queue-team : show everyone's open count, visible only to whoever runs it ----
+app.command('/queue-team', async ({ command, ack, respond }) => {
+  await ack();
+  const grouped = store.getAllOpenGroupedByAssignee();
+  const entries = Object.entries(grouped);
+
+  if (entries.length === 0) {
+    await respond({ response_type: 'ephemeral', text: 'Nobody has anything in their queue right now. 🎉' });
+    return;
+  }
+
+  entries.sort((a, b) => b[1] - a[1]); // most pending first
+  const lines = entries.map(([userId, count]) => `• <@${userId}> — *${count}* item${count === 1 ? '' : 's'}`).join('\n');
+
+  await respond({
+    response_type: 'ephemeral', // only visible to the person who ran the command
+    text: `*Team review queue:*\n${lines}`,
   });
 });
 
@@ -137,7 +170,7 @@ app.shortcut('add_to_queue', async ({ shortcut, ack, client }) => {
           type: 'input',
           block_id: 'note_block',
           optional: true,
-          label: { type: 'plain_text', text: 'Note (optional)' },
+          label: { type: 'plain_text', text: 'Task name / note (optional)' },
           element: {
             type: 'plain_text_input',
             action_id: 'note_input',
@@ -183,15 +216,14 @@ app.view('add_to_queue_submit', async ({ ack, body, view, client }) => {
   });
 });
 
-// ---- Only messages containing this trigger count as a review assignment ----
-const TRIGGER_PATTERN = /(^|\s)[!/]review\b/i;
-
-// ---- Auto-detect "!review @name" (or "/review @name") in messages and add to that person's queue ----
+// ---- Auto-detect "!review TaskName @name" (or "/review TaskName @name") and add to that person's queue ----
 app.event('message', async ({ event, client, context }) => {
   console.log('[message event received]', { text: event.text, subtype: event.subtype, channel: event.channel, botUserId: context.botUserId });
   if (event.subtype) return; // skip edits, deletes, joins, bot messages, etc.
   if (event.bot_id) return;
   if (!TRIGGER_PATTERN.test(event.text || '')) return; // ignore plain chat — only explicit !review counts
+
+  const note = extractTaskName(event.text || '');
 
   const mentionPattern = /<@([A-Z0-9]+)>/g;
   const mentioned = new Set();
@@ -209,7 +241,7 @@ app.event('message', async ({ event, client, context }) => {
     channelId: event.channel,
     threadTs: event.thread_ts || event.ts,
     assigneeIds: [...mentioned],
-    note: '',
+    note,
     addedBy: event.user,
     headerText: 'Assigned (via !review) to',
   });

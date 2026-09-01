@@ -11,6 +11,10 @@ features:
       description: Show your current review queue and count
       usage_hint: ""
       should_escape: false
+    - command: /queue-team
+      description: Show how many items everyone has pending (visible only to you)
+      usage_hint: ""
+      should_escape: false
   shortcuts:
     - name: Add to Review Queue
       type: message
@@ -23,7 +27,15 @@ oauth_config:
       - chat:write
       - users:read
       - im:write
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
 settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
   interactivity:
     is_enabled: true
   org_deploy_enabled: false
