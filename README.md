@@ -2,10 +2,21 @@
 
 A Slack bot that does exactly what Ayan described:
 - Any reviewer can run `/queue` to instantly see how many items are assigned to them.
-- Any team member can right-click a message → **Add to Review Queue**, assign it to a reviewer, and the bot posts a threaded reply with a **✅ Mark Done** button.
-- Clicking that button closes the review — no separate step, no leaving Slack.
+- **Type `!review @name` (or `/review @name`) in a normal message and the bot automatically adds it to their queue** — works on a fresh message or as a reply in an existing thread. Plain @mentions with no trigger word are ignored, so casual tagging doesn't clutter anyone's queue.
+- Or, right-click a message → **Add to Review Queue** to assign it manually — pick **multiple people at once**, or check **"assign to everyone in this channel"**.
+- Every assignment gets its own **✅ Mark Done** button. Clicking it closes that person's review — no separate step, no leaving Slack.
 
 Works in both #content-review-hindi and #content-review-english (any channel the bot is added to) automatically — no per-channel setup needed.
+
+**Example:** post the video, then reply in that thread with `!review @Debajit` — only that exact phrase triggers an assignment, so "@Debajit check this out" in normal chat won't.
+
+## Updating an already-deployed bot (you're doing this now)
+
+Since scopes and event subscriptions changed, this isn't just a code update — three things need to happen in order:
+
+1. **Update the Slack app's scopes** — go to your app at api.slack.com/apps → **App Manifest** → replace the YAML with the new `manifest.yaml` from this folder → Save.
+2. **Reinstall the app** — go to **OAuth & Permissions** → click **Reinstall to Workspace** (this grants the new scopes). Recopy the **Bot User OAuth Token** just in case it changed, and update it in Render's Environment tab if so.
+3. **Redeploy the code** — push the updated `src/index.js` and `manifest.yaml` to your GitHub repo. Render will auto-redeploy (or trigger **Manual Deploy** on the Render dashboard if it doesn't pick it up automatically).
 
 ---
 

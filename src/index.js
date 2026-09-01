@@ -12,12 +12,64 @@ const app = new App({
 
 // Tiny keep-alive server so free hosts (like Render) see this as a "web service"
 // and an external pinger (e.g. UptimeRobot, free) can stop it from sleeping.
-// This does nothing Slack-related — it's purely to keep the process awake on free hosting.
 const keepAlive = express();
 keepAlive.get('/', (_req, res) => res.status(200).send('Review Queue Bot is alive.'));
 keepAlive.listen(process.env.PORT || 3000, () => {
   console.log(`Keep-alive server listening on port ${process.env.PORT || 3000}`);
 });
+
+// ---- Shared helper: build one Block Kit section (with its own Mark Done button) per assignee ----
+function buildAssigneeSection(item, assigneeId, note, queueCount) {
+  return {
+    type: 'section',
+    block_id: `queue_actions_${item.id}`,
+    text: {
+      type: 'mrkdwn',
+      text: `📥 <@${assigneeId}>${note ? ` — _${note}_` : ''}\nNow has *${queueCount}* item${queueCount === 1 ? '' : 's'} in queue.`,
+    },
+    accessory: {
+      type: 'button',
+      action_id: 'close_item',
+      text: { type: 'plain_text', text: '✅ Mark Done' },
+      style: 'primary',
+      value: String(item.id),
+    },
+  };
+}
+
+// ---- Shared helper: create one queue item per assignee + post the confirmation blocks ----
+async function assignAndPost({ client, channelId, threadTs, assigneeIds, note, addedBy, headerText }) {
+  const sections = [];
+  for (const assigneeId of assigneeIds) {
+    const item = store.addItem({ assigneeId, channelId, messageTs: threadTs, note, addedBy });
+    const queueCount = store.getOpenQueueForUser(assigneeId).length;
+    sections.push(buildAssigneeSection(item, assigneeId, note, queueCount));
+  }
+
+  await client.chat.postMessage({
+    channel: channelId,
+    thread_ts: threadTs,
+    text: `${headerText} ${assigneeIds.map((id) => `<@${id}>`).join(', ')}`,
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `*${headerText}*` } }, ...sections],
+  });
+}
+
+// ---- Fetch all non-bot, non-deleted members of a channel ----
+async function getChannelHumanMembers(client, channelId, excludeUserId) {
+  const result = await client.conversations.members({ channel: channelId });
+  const memberIds = result.members || [];
+  const humans = [];
+  for (const id of memberIds) {
+    if (id === excludeUserId) continue;
+    try {
+      const info = await client.users.info({ user: id });
+      if (!info.user.is_bot && !info.user.deleted) humans.push(id);
+    } catch (e) {
+      // skip users we can't look up
+    }
+  }
+  return humans;
+}
 
 // ---- /queue : show my current assigned count + list ----
 app.command('/queue', async ({ command, ack, respond }) => {
@@ -25,10 +77,7 @@ app.command('/queue', async ({ command, ack, respond }) => {
   const items = store.getOpenQueueForUser(command.user_id);
 
   if (items.length === 0) {
-    await respond({
-      response_type: 'ephemeral',
-      text: "You're all caught up — nothing in your queue right now. 🎉",
-    });
+    await respond({ response_type: 'ephemeral', text: "You're all caught up — nothing in your queue right now. 🎉" });
     return;
   }
 
@@ -46,7 +95,7 @@ app.command('/queue', async ({ command, ack, respond }) => {
   });
 });
 
-// ---- Message shortcut: "Add to Review Queue" ----
+// ---- Message shortcut: "Add to Review Queue" (manual, supports multiple people + whole channel) ----
 app.shortcut('add_to_queue', async ({ shortcut, ack, client }) => {
   await ack();
   await client.views.open({
@@ -65,11 +114,23 @@ app.shortcut('add_to_queue', async ({ shortcut, ack, client }) => {
         {
           type: 'input',
           block_id: 'assignee_block',
-          label: { type: 'plain_text', text: 'Assign to' },
+          optional: true,
+          label: { type: 'plain_text', text: 'Assign to (pick one or more)' },
           element: {
-            type: 'users_select',
+            type: 'multi_users_select',
             action_id: 'assignee_select',
-            placeholder: { type: 'plain_text', text: 'Select a reviewer' },
+            placeholder: { type: 'plain_text', text: 'Select reviewers' },
+          },
+        },
+        {
+          type: 'input',
+          block_id: 'whole_channel_block',
+          optional: true,
+          label: { type: 'plain_text', text: 'Or skip the picker above and use:' },
+          element: {
+            type: 'checkboxes',
+            action_id: 'whole_channel_checkbox',
+            options: [{ text: { type: 'plain_text', text: 'Assign to everyone in this channel' }, value: 'whole_channel' }],
           },
         },
         {
@@ -88,54 +149,72 @@ app.shortcut('add_to_queue', async ({ shortcut, ack, client }) => {
   });
 });
 
-// ---- Handle modal submission: create the queue item + post thread reply ----
+// ---- Handle modal submission ----
 app.view('add_to_queue_submit', async ({ ack, body, view, client }) => {
-  await ack();
   const meta = JSON.parse(view.private_metadata);
-  const assigneeId = view.state.values.assignee_block.assignee_select.selected_user;
+  const selectedUsers = view.state.values.assignee_block.assignee_select.selected_users || [];
+  const wholeChannel = (view.state.values.whole_channel_block.whole_channel_checkbox.selected_options || []).length > 0;
   const note = view.state.values.note_block.note_input.value || '';
   const addedBy = body.user.id;
 
-  const item = store.addItem({
-    assigneeId,
+  if (selectedUsers.length === 0 && !wholeChannel) {
+    await ack({
+      response_action: 'errors',
+      errors: { assignee_block: 'Pick at least one person, or check "assign to everyone in this channel".' },
+    });
+    return;
+  }
+  await ack();
+
+  let assigneeIds = selectedUsers;
+  if (wholeChannel) {
+    assigneeIds = await getChannelHumanMembers(client, meta.channelId, addedBy);
+  }
+  assigneeIds = [...new Set(assigneeIds)]; // dedupe
+
+  await assignAndPost({
+    client,
     channelId: meta.channelId,
-    messageTs: meta.messageTs,
+    threadTs: meta.messageTs,
+    assigneeIds,
     note,
     addedBy,
-  });
-
-  const queueCount = store.getOpenQueueForUser(assigneeId).length;
-
-  await client.chat.postMessage({
-    channel: meta.channelId,
-    thread_ts: meta.messageTs,
-    text: `Assigned to <@${assigneeId}>${note ? ` — ${note}` : ''}. They now have ${queueCount} item${queueCount === 1 ? '' : 's'} in their queue.`,
-    blocks: [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `📥 Assigned to <@${assigneeId}>${note ? ` — _${note}_` : ''}\nThey now have *${queueCount}* item${queueCount === 1 ? '' : 's'} in their queue.`,
-        },
-      },
-      {
-        type: 'actions',
-        block_id: `queue_actions_${item.id}`,
-        elements: [
-          {
-            type: 'button',
-            action_id: 'close_item',
-            text: { type: 'plain_text', text: '✅ Mark Done' },
-            style: 'primary',
-            value: String(item.id),
-          },
-        ],
-      },
-    ],
+    headerText: 'Assigned to',
   });
 });
 
-// ---- Handle "Mark Done" button click: close item + edit the thread message ----
+// ---- Only messages containing this trigger count as a review assignment ----
+const TRIGGER_PATTERN = /(^|\s)[!/]review\b/i;
+
+// ---- Auto-detect "!review @name" (or "/review @name") in messages and add to that person's queue ----
+app.event('message', async ({ event, client, context }) => {
+  if (event.subtype) return; // skip edits, deletes, joins, bot messages, etc.
+  if (event.bot_id) return;
+  if (!TRIGGER_PATTERN.test(event.text || '')) return; // ignore plain chat — only explicit !review counts
+
+  const mentionPattern = /<@([A-Z0-9]+)>/g;
+  const mentioned = new Set();
+  let match;
+  while ((match = mentionPattern.exec(event.text || '')) !== null) {
+    const userId = match[1];
+    if (userId === event.user) continue; // skip self-mentions
+    if (userId === context.botUserId) continue; // skip mentioning the bot itself
+    mentioned.add(userId);
+  }
+  if (mentioned.size === 0) return;
+
+  await assignAndPost({
+    client,
+    channelId: event.channel,
+    threadTs: event.thread_ts || event.ts,
+    assigneeIds: [...mentioned],
+    note: '',
+    addedBy: event.user,
+    headerText: 'Assigned (via !review) to',
+  });
+});
+
+// ---- Handle "Mark Done" button click ----
 app.action('close_item', async ({ ack, body, client, action }) => {
   await ack();
   const itemId = Number(action.value);
@@ -145,20 +224,22 @@ app.action('close_item', async ({ ack, body, client, action }) => {
 
   const remaining = store.getOpenQueueForUser(item.assigneeId).length;
 
-  await client.chat.update({
-    channel: body.channel.id,
-    ts: body.message.ts,
-    text: `✅ Closed by <@${closedBy}>. <@${item.assigneeId}> now has ${remaining} item${remaining === 1 ? '' : 's'} left.`,
-    blocks: [
-      {
+  // Update just this assignee's section within the message, leaving other assignees' sections untouched
+  const blocks = body.message.blocks.map((block) => {
+    if (block.block_id === `queue_actions_${item.id}`) {
+      return {
         type: 'section',
+        block_id: block.block_id,
         text: {
           type: 'mrkdwn',
-          text: `✅ *Closed* by <@${closedBy}>${item.note ? ` — _${item.note}_` : ''}\n<@${item.assigneeId}> now has *${remaining}* item${remaining === 1 ? '' : 's'} left in their queue.`,
+          text: `✅ *Closed* by <@${closedBy}> — <@${item.assigneeId}>${item.note ? ` — _${item.note}_` : ''}\nNow has *${remaining}* left.`,
         },
-      },
-    ],
+      };
+    }
+    return block;
   });
+
+  await client.chat.update({ channel: body.channel.id, ts: body.message.ts, text: 'Item closed.', blocks });
 });
 
 (async () => {
