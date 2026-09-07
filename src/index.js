@@ -219,7 +219,8 @@ app.view('add_to_queue_submit', async ({ ack, body, view, client }) => {
 // ---- Auto-detect "!review TaskName @name" (or "/review TaskName @name") and add to that person's queue ----
 app.event('message', async ({ event, client, context }) => {
   console.log('[message event received]', { text: event.text, subtype: event.subtype, channel: event.channel, botUserId: context.botUserId });
-  if (event.subtype) return; // skip edits, deletes, joins, bot messages, etc.
+  // Allow normal messages and file shares (media attachments); skip edits, deletes, joins, bot messages, etc.
+  if (event.subtype && event.subtype !== 'file_share') return;
   if (event.bot_id) return;
   if (!TRIGGER_PATTERN.test(event.text || '')) return; // ignore plain chat — only explicit !review counts
 
